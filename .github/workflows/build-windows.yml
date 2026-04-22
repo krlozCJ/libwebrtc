@@ -1,0 +1,119 @@
+name: Build libwebrtc Windows x64
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.gn'
+      - '**.gni'
+      - 'patchs/**'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        default: 'release'
+        required: true
+        type: choice
+        options:
+          - release
+          - debug
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout tu fork de libwebrtc
+        uses: actions/checkout@v4
+        with:
+          path: libwebrtc_src  # lo clonamos aparte primero para calcular el hash del caché
+
+      - name: Install depot_tools
+        shell: cmd
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
+          echo C:\depot_tools >> %GITHUB_PATH%
+
+      - name: Crear directorio de build y .gclient
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\webrtc_build
+          $gclient = @"
+          solutions = [
+            {
+              "name" : 'src',
+              "url" : 'https://github.com/webrtc-sdk/webrtc.git@m137_release',
+              "deps_file" : 'DEPS',
+              "managed" : False,
+              "custom_deps" : { },
+              "custom_vars": {},
+            },
+          ]
+          target_os = ['win']
+          "@
+          $gclient | Out-File -FilePath C:\webrtc_build\.gclient -Encoding utf8
+
+      # El caché es la clave: guarda los 6GB entre ejecuciones
+      - name: Cache WebRTC source
+        id: cache-webrtc
+        uses: actions/cache@v4
+        with:
+          path: C:\webrtc_build\src
+          key: webrtc-src-m137-win-${{ hashFiles('libwebrtc_src/patchs/custom_audio_source_m137.patch') }}
+          restore-keys: |
+            webrtc-src-m137-win-
+
+      - name: gclient sync (solo si no hay caché)
+        if: steps.cache-webrtc.outputs.cache-hit != 'true'
+        shell: cmd
+        working-directory: C:\webrtc_build
+        run: gclient sync --no-history --shallow
+
+      - name: Copiar libwebrtc al src
+        shell: cmd
+        run: |
+          xcopy /E /I /Y libwebrtc_src C:\webrtc_build\src\libwebrtc
+
+      - name: Apply patch (si no estaba ya aplicado)
+        shell: cmd
+        working-directory: C:\webrtc_build\src
+        run: |
+          git apply --check libwebrtc/patchs/custom_audio_source_m137.patch 2>nul && git apply libwebrtc/patchs/custom_audio_source_m137.patch || echo "Patch ya aplicado o no aplica, continuando..."
+
+      - name: Set environment variables
+        shell: cmd
+        run: |
+          echo DEPOT_TOOLS_WIN_TOOLCHAIN=0 >> %GITHUB_ENV%
+          echo GYP_MSVS_VERSION=2022 >> %GITHUB_ENV%
+          echo GYP_GENERATORS=ninja,msvs-ninja >> %GITHUB_ENV%
+          echo GYP_MSVS_OVERRIDE_PATH=C:\Program Files\Microsoft Visual Studio\2022\Enterprise >> %GITHUB_ENV%
+
+      - name: GN gen
+        shell: cmd
+        working-directory: C:\webrtc_build\src
+        run: |
+          gn gen out/Windows-x64 --args="target_os=\"win\" target_cpu=\"x64\" is_component_build=false is_clang=true is_debug=false rtc_use_h264=true ffmpeg_branding=\"Chrome\" rtc_include_tests=false rtc_build_examples=false libwebrtc_desktop_capture=true"
+
+      - name: Compilar con Ninja
+        shell: cmd
+        working-directory: C:\webrtc_build\src
+        run: ninja -C out/Windows-x64 libwebrtc
+
+      - name: Empaquetar output
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact/win64
+          Copy-Item C:\webrtc_build\src\out\Windows-x64\libwebrtc.dll artifact\win64\
+          Copy-Item C:\webrtc_build\src\out\Windows-x64\libwebrtc.dll.lib artifact\win64\
+          # Copiar headers también
+          Copy-Item -Recurse libwebrtc_src\include artifact\include
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: libwebrtc-win64-${{ github.sha }}
+          path: artifact\
+          retention-days: 30
