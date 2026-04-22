@@ -30,12 +30,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: libwebrtc_src  # lo clonamos aparte primero para calcular el hash del caché
+        
+      - name: Configurar Entorno Windows para WebRTC
+        shell: powershell
+        run: |
+          # 1. Variables vitales ANTES de hacer cualquier cosa con depot_tools
+          Add-Content $env:GITHUB_ENV "DEPOT_TOOLS_WIN_TOOLCHAIN=0"
+          Add-Content $env:GITHUB_ENV "GYP_MSVS_VERSION=2022"
+          Add-Content $env:GITHUB_ENV "GYP_GENERATORS=ninja,msvs-ninja"
+          Add-Content $env:GITHUB_ENV "GYP_MSVS_OVERRIDE_PATH=C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
 
       - name: Install depot_tools
         shell: cmd
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
           echo C:\depot_tools >> %GITHUB_PATH%
+          Add-Content $env:GITHUB_PATH "C:\depot_tools"
+
+      - name: Inicializar depot_tools (Windows quirk)
+        shell: cmd
+        run: |
+          # 4. En Windows, gclient necesita ejecutarse una vez en vacío para auto-actualizarse 
+          # e instalar su propio Python y Git interno antes de hacer el 'sync' real.
+          call C:\depot_tools\gclient.bat
 
       - name: Crear directorio de build y .gclient
         shell: powershell
